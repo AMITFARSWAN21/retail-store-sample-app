@@ -16,6 +16,9 @@ resource "random_string" "suffix" {
   upper   = false
 }
 
+# Stored once in state, so the CreatedDate tag stays stable between plans
+resource "time_static" "created" {}
+
 # Local computed values
 locals {
   # Cluster configuration with unique suffix to avoid conflicts
@@ -33,7 +36,7 @@ locals {
     ManagedBy     = "terraform"
     CreatedBy     = "TrainWithShubhamCommunity"
     Owner         = data.aws_caller_identity.current.user_id
-    CreatedDate   = formatdate("YYYY-MM-DD", timestamp())
+    CreatedDate   = formatdate("YYYY-MM-DD", time_static.created.rfc3339)
   }
   
   # Kubernetes subnet tags

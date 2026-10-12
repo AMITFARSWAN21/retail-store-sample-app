@@ -1,0 +1,159 @@
+name: CI - build and publish images
+
+# Builds only the services whose code changed, scans the image, pushes it to
+# private ECR tagged with the commit SHA, then writes the new tag into the
+# Helm values. ArgoCD sees that commit and deploys it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+    inputs:
+      build_all:
+        description: "Build all services"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-west-2
+  ECR_PREFIX: retail-store
+  ALL_SERVICES: "ui catalog cart orders checkout"
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect changed services
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.detect.outputs.services }}
+      tag: ${{ steps.detect.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: detect
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          BUILD_ALL: ${{ inputs.build_all }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE="HEAD~1"
+          fi
+          files=$(git diff --name-only "$BEFORE" "$SHA" || true)
+
+          services=()
+          for s in $ALL_SERVICES; do
+            # a change counts only if it is outside the chart folder (the bot edits the chart)
+            if [ "$BUILD_ALL" = "true" ] || echo "$files" | grep -E "^src/$s/" | grep -vqE "^src/$s/chart/"; then
+              services+=("$s")
+            fi
+          done
+
+          json=$(printf '%s\n' "${services[@]:-}" | jq -R . | jq -cs 'map(select(length>0))')
+          echo "services=$json" >> "$GITHUB_OUTPUT"
+          echo "tag=${SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "Services to build: $json"
+
+  build:
+    name: Build ${{ matrix.service }}
+    needs: detect
+    if: needs.detect.outputs.services != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # needed for AWS OIDC
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.detect.outputs.services) }}
+    env:
+      TAG: ${{ needs.detect.outputs.tag }}
+      REPO: retail-store/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      # Tags are immutable, so a re-run for the same commit must not push again
+      - name: Check if image already exists
+        id: exists
+        run: |
+          if aws ecr describe-images --repository-name "$REPO" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Image $REPO:$TAG already exists, skipping build"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image
+        if: steps.exists.outputs.found == 'false'
+        run: docker build -t "$REPO:$TAG" "src/${{ matrix.service }}"
+
+      - name: Scan image (fail on fixable CRITICAL findings)
+        if: steps.exists.outputs.found == 'false'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REPO }}:${{ env.TAG }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Push image
+        if: steps.exists.outputs.found == 'false'
+        run: |
+          IMAGE="${{ vars.ECR_REGISTRY }}/$REPO:$TAG"
+          docker tag "$REPO:$TAG" "$IMAGE"
+          docker push "$IMAGE"
+
+  update-manifests:
+    name: Update Helm values
+    needs: [detect, build]
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.detect.outputs.tag }}
+      SERVICES: ${{ needs.detect.outputs.services }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set new image tags
+        run: |
+          set -euo pipefail
+          for s in $(echo "$SERVICES" | jq -r '.[]'); do
+            f="src/$s/chart/values.yaml"
+            export IMG_REPO="${{ vars.ECR_REGISTRY }}/$ECR_PREFIX/$s"
+            yq -i '.image.repository = strenv(IMG_REPO) | .image.tag = strenv(TAG) | .image.pullPolicy = "IfNotPresent" | .imagePullSecrets = []' "$f"
+          done
+          git diff --stat
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "ci: deploy $TAG [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
