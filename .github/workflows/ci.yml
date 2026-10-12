@@ -119,6 +119,8 @@ jobs:
         if: steps.exists.outputs.found == 'false'
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
         with:
+          # The action's default Trivy (v0.65.0) is no longer published, so pin one that exists
+          version: v0.75.0
           image-ref: ${{ env.REPO }}:${{ env.TAG }}
           severity: CRITICAL
           ignore-unfixed: true
