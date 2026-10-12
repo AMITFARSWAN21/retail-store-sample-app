@@ -6,7 +6,7 @@ replicaCount: 1
 image:
   repository: 523520772283.dkr.ecr.us-west-2.amazonaws.com/retail-store/cart
   pullPolicy: IfNotPresent
-  tag: "v1"
+  tag: "7809ff2"
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
