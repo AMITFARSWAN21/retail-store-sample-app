@@ -5,16 +5,14 @@
 # only for this repository and branch, and the role can only push to the
 # project's ECR repositories.
 
-variable "github_repository" {
-  description = "GitHub repository (owner/name) allowed to push images"
+variable "github_oidc_subject" {
+  description = <<-EOT
+    Exact OIDC "sub" claim GitHub sends for the repo/branch allowed to push images.
+    This repo's subject includes the owner and repo IDs, so it is not the classic
+    "repo:OWNER/NAME:ref:refs/heads/main" form.
+  EOT
   type        = string
-  default     = "AMITFARSWAN21/retail-store-sample-app"
-}
-
-variable "github_branch" {
-  description = "Branch whose workflows may assume the CI role"
-  type        = string
-  default     = "main"
+  default     = "repo:AMITFARSWAN21@113001215/retail-store-sample-app@1415124597:ref:refs/heads/main"
 }
 
 variable "create_github_oidc_provider" {
@@ -64,7 +62,7 @@ data "aws_iam_policy_document" "github_ci_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:ref:refs/heads/${var.github_branch}"]
+      values   = [var.github_oidc_subject]
     }
   }
 }
